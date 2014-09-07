@@ -11,7 +11,7 @@
 
 enum lval_type { LVAL_ERR, LVAL_NUM, LVAL_SYM, LVAL_SEXP };
 
-typedef struct lval {
+struct lval {
     enum lval_type type;
     union {
         char* err;
@@ -20,46 +20,48 @@ typedef struct lval {
         struct lval_sexp {
             int count;
             struct lval** cell;
-        } sexp;
-    } v;
-} lval;
+        };
+    };
+};
 
-lval lval_num(long x) {
-    lval v;
+struct lval lval_num(long x) {
+    struct lval v;
     v.type = LVAL_NUM;
-    v.v.num = x;
+    v.num = x;
     return v;
 }
 
-lval lval_err(char* x) {
-    lval v;
+struct lval lval_err(char* x) {
+    struct lval v;
     v.type = LVAL_ERR;
-    v.v.err = x;
+    v.err = x;
     return v;
 }
 
-char* lval_format(lval v) {
+char* lval_format(struct lval v) {
     switch (v.type) {
         case LVAL_NUM: {
             char* out;
-            asprintf(&out, "%li", v.v.num);
+            asprintf(&out, "%li", v.num);
             return out;
         }
         case LVAL_SYM:
         case LVAL_SEXP:
             return "!! todo";
         case LVAL_ERR:
-            return v.v.err;
+            return v.err;
     }
 }
 
-lval eval_operator(char* op, lval x, lval y) {
+struct lval eval_operator(
+    char* op, struct lval x, struct lval y
+) {
 
     if (x.type == LVAL_ERR) return x;
     if (y.type == LVAL_ERR) return y;
 
-    long a = x.v.num;
-    long b = y.v.num;
+    long a = x.num;
+    long b = y.num;
 
     if (strcmp(op, "+") == 0) {
         return lval_num(a + b);
@@ -91,14 +93,14 @@ lval eval_operator(char* op, lval x, lval y) {
     return lval_err("Unknown symbol");
 }
 
-lval eval_unary(char* op, lval x) {
+struct lval eval_unary(char* op, struct lval x) {
     if (x.type == LVAL_ERR) return x;
 
-    if (strcmp(op, "-") == 0) return lval_num(-1 * x.v.num);
+    if (strcmp(op, "-") == 0) return lval_num(-1 * x.num);
     return x;
 }
 
-lval eval(mpc_ast_t* node) {
+struct lval eval(mpc_ast_t* node) {
 
     if (strstr(node->tag, "number")) {
         errno = 0;
@@ -112,7 +114,7 @@ lval eval(mpc_ast_t* node) {
 
     char* op = node->children[1]->contents;
 
-    lval x = eval(node->children[2]);
+    struct lval x = eval(node->children[2]);
 
     if (node->children_num == 4) {
         x = eval_unary(op, x);
