@@ -9,50 +9,48 @@
 
 #include "mpc.h"
 
-enum { LVAL_NUM, LVAL_ERR };
-enum { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM };
+enum lval_type { LVAL_ERR, LVAL_NUM, LVAL_SYM, LVAL_SEXP };
 
-typedef struct {
-    int type;
-    long num;
-    int err;
+typedef struct lval {
+    enum lval_type type;
+    union {
+        char* err;
+        long num;
+        char* sym;
+        struct lval_sexp {
+            int count;
+            struct lval** cell;
+        } sexp;
+    } v;
 } lval;
 
 lval lval_num(long x) {
     lval v;
     v.type = LVAL_NUM;
-    v.num = x;
+    v.v.num = x;
     return v;
 }
 
-lval lval_err(int x) {
+lval lval_err(char* x) {
     lval v;
     v.type = LVAL_ERR;
-    v.err = x;
+    v.v.err = x;
     return v;
 }
 
 char* lval_format(lval v) {
-    char* out;
     switch (v.type) {
-        case LVAL_NUM:
-            asprintf(&out, "%li", v.num);
-            break;
+        case LVAL_NUM: {
+            char* out;
+            asprintf(&out, "%li", v.v.num);
+            return out;
+        }
+        case LVAL_SYM:
+        case LVAL_SEXP:
+            return "!! todo";
         case LVAL_ERR:
-            switch (v.err) {
-                case LERR_DIV_ZERO:
-                    out = "Error: Division by zero";
-                    break;
-                case LERR_BAD_NUM:
-                    out = "Error: Invalid number";
-                    break;
-                case LERR_BAD_OP:
-                    out = "Error: Invaild operator";
-                    break;
-            }
-            break;
+            return v.v.err;
     }
-    return out;
 }
 
 lval eval_operator(char* op, lval x, lval y) {
@@ -60,40 +58,43 @@ lval eval_operator(char* op, lval x, lval y) {
     if (x.type == LVAL_ERR) return x;
     if (y.type == LVAL_ERR) return y;
 
+    long a = x.v.num;
+    long b = y.v.num;
+
     if (strcmp(op, "+") == 0) {
-        return lval_num(x.num + y.num);
+        return lval_num(a + b);
     }
     if (strcmp(op, "-") == 0) {
-        return lval_num(x.num - y.num);
+        return lval_num(a - b);
     }
     if (strcmp(op, "*") == 0) {
-        return lval_num(x.num * y.num);
+        return lval_num(a * b);
     }
     if (strcmp(op, "/") == 0) {
-        if (y.num == 0) return lval_err(LERR_DIV_ZERO);
-        return lval_num(x.num / y.num);
+        if (b == 0) return lval_err("Division by 0");
+        return lval_num(a / b);
     }
     if (strcmp(op, "%") == 0) {
-        if (y.num == 0) return lval_err(LERR_DIV_ZERO);
-        return lval_num(x.num % y.num);
+        if (b == 0) return lval_err("Division by 0");
+        return lval_num(a % b);
     }
     if (strcmp(op, "^") == 0) {
-        return lval_num(pow(x.num, y.num));
+        return lval_num(pow(a, b));
     }
     if (strcmp(op, "min") == 0) {
-        return lval_num(x.num < y.num ? x.num : y.num);
+        return lval_num(a < b ? a : b);
     }
-    if (strcmp(op, "max.num") == 0) {
-        return lval_num(x.num > y.num ? x.num : y.num );
+    if (strcmp(op, "maa") == 0) {
+        return lval_num(a > b ? a : b);
     }
 
-    return lval_err(LERR_BAD_OP);
+    return lval_err("Unknown symbol");
 }
 
 lval eval_unary(char* op, lval x) {
-    if (x.type)
+    if (x.type == LVAL_ERR) return x;
 
-    if (strcmp(op, "-") == 0) return lval_num(-1 * x.num);
+    if (strcmp(op, "-") == 0) return lval_num(-1 * x.v.num);
     return x;
 }
 
@@ -102,7 +103,11 @@ lval eval(mpc_ast_t* node) {
     if (strstr(node->tag, "number")) {
         errno = 0;
         long x = strtol(node->contents, NULL, 10);
-        return errno == 0 ? lval_num(x) : lval_err(LERR_BAD_NUM);
+        if (errno == 0) {
+            return lval_num(x);
+        } else {
+            lval_err("What number is this?");
+        }
     }
 
     char* op = node->children[1]->contents;
@@ -123,19 +128,21 @@ lval eval(mpc_ast_t* node) {
 int main(int argc, char** argv)
 {
     mpc_parser_t* Number = mpc_new("number");
-    mpc_parser_t* Operator = mpc_new("operator");
+    mpc_parser_t* Symbol = mpc_new("symbol");
+    mpc_parser_t* Sexp = mpc_new("sexp");
     mpc_parser_t* Expr = mpc_new("expr");
     mpc_parser_t* Program = mpc_new("program");
 
     mpca_lang(MPCA_LANG_DEFAULT,
     "                                                       \
         number   : /-?[0-9]+/ ;                             \
-        operator : '+' | '-' | '*' | '/' | '%' | '^' |      \
+        symbol   : '+' | '-' | '*' | '/' | '%' | '^' |      \
                    \"min\" | \"max\";                       \
-        expr     : <number> | '(' <operator> <expr>+ ')' ;  \
-        program  : /^/ <operator> <expr>+ /$/ ;             \
+        sexp     : '(' <expr>* ')' ;                        \
+        expr     : <number> | <symbol> | <sexp> ;           \
+        program  : /^/ <expr>* /$/ ;                        \
     ",
-        Number, Operator, Expr, Program);
+        Number, Symbol, Sexp, Expr, Program);
 
     puts("Welcome to gLenISP Version 0.0.0.1");
     puts("You have 1000 parentheses remaining");
@@ -153,7 +160,9 @@ int main(int argc, char** argv)
 
             mpc_ast_print(r.output);
 
-            printf("%s\n", lval_format(eval(a)));
+            char* result = lval_format(eval(a));
+            printf("%s\n", result);
+            free(result);
 
             mpc_ast_delete(r.output);
         } else {
@@ -165,7 +174,7 @@ int main(int argc, char** argv)
 
     }
 
-    mpc_cleanup(4, Number, Operator, Expr, Program);
+    mpc_cleanup(5, Number, Symbol, Sexp, Expr, Program);
 
     return 0;
 }
