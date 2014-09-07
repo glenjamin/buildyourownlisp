@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include <editline/readline.h>
 #ifndef __APPLE__
@@ -8,44 +9,112 @@
 
 #include "mpc.h"
 
-int node_count(mpc_ast_t* node) {
-    if (node->children_num == 0) {
-        return 1;
+enum { LVAL_NUM, LVAL_ERR };
+enum { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM };
+
+typedef struct {
+    int type;
+    long num;
+    int err;
+} lval;
+
+lval lval_num(long x) {
+    lval v;
+    v.type = LVAL_NUM;
+    v.num = x;
+    return v;
+}
+
+lval lval_err(int x) {
+    lval v;
+    v.type = LVAL_ERR;
+    v.err = x;
+    return v;
+}
+
+char* lval_format(lval v) {
+    char* out;
+    switch (v.type) {
+        case LVAL_NUM:
+            asprintf(&out, "%li", v.num);
+            break;
+        case LVAL_ERR:
+            switch (v.err) {
+                case LERR_DIV_ZERO:
+                    out = "Error: Division by zero";
+                    break;
+                case LERR_BAD_NUM:
+                    out = "Error: Invalid number";
+                    break;
+                case LERR_BAD_OP:
+                    out = "Error: Invaild operator";
+                    break;
+            }
+            break;
     }
-    int total = 1;
-    for (int i = 0; i < node->children_num; i++) {
-        total = total + node_count(node->children[i]);
+    return out;
+}
+
+lval eval_operator(char* op, lval x, lval y) {
+
+    if (x.type == LVAL_ERR) return x;
+    if (y.type == LVAL_ERR) return y;
+
+    if (strcmp(op, "+") == 0) {
+        return lval_num(x.num + y.num);
     }
-    return total;
+    if (strcmp(op, "-") == 0) {
+        return lval_num(x.num - y.num);
+    }
+    if (strcmp(op, "*") == 0) {
+        return lval_num(x.num * y.num);
+    }
+    if (strcmp(op, "/") == 0) {
+        if (y.num == 0) return lval_err(LERR_DIV_ZERO);
+        return lval_num(x.num / y.num);
+    }
+    if (strcmp(op, "%") == 0) {
+        if (y.num == 0) return lval_err(LERR_DIV_ZERO);
+        return lval_num(x.num % y.num);
+    }
+    if (strcmp(op, "^") == 0) {
+        return lval_num(pow(x.num, y.num));
+    }
+    if (strcmp(op, "min") == 0) {
+        return lval_num(x.num < y.num ? x.num : y.num);
+    }
+    if (strcmp(op, "max.num") == 0) {
+        return lval_num(x.num > y.num ? x.num : y.num );
+    }
+
+    return lval_err(LERR_BAD_OP);
 }
 
-void node_debug(mpc_ast_t* node) {
-    printf("Tag: %s\n", node->tag);
-    printf("Contents: %s\n", node->contents);
-    printf("Total Children: %d\n", node_count(node));
+lval eval_unary(char* op, lval x) {
+    if (x.type)
+
+    if (strcmp(op, "-") == 0) return lval_num(-1 * x.num);
+    return x;
 }
 
-long eval_operator(char* op, long x, long y) {
-    if (strcmp(op, "+") == 0) return x + y;
-    if (strcmp(op, "-") == 0) return x - y;
-    if (strcmp(op, "*") == 0) return x * y;
-    if (strcmp(op, "/") == 0) return x / y;
-    if (strcmp(op, "%") == 0) return x % y;
-    return 0;
-}
-
-long eval(mpc_ast_t* node) {
+lval eval(mpc_ast_t* node) {
 
     if (strstr(node->tag, "number")) {
-        return atoi(node->contents);
+        errno = 0;
+        long x = strtol(node->contents, NULL, 10);
+        return errno == 0 ? lval_num(x) : lval_err(LERR_BAD_NUM);
     }
 
     char* op = node->children[1]->contents;
 
-    long x = eval(node->children[2]);
+    lval x = eval(node->children[2]);
 
-    for (int i = 3; i < node->children_num - 1; i++) {
-        x = eval_operator(op, x, eval(node->children[i]));
+    if (node->children_num == 4) {
+        x = eval_unary(op, x);
+    } else {
+        for (int i = 3; i < node->children_num - 1; i++) {
+            x = eval_operator(op, x, eval(node->children[i]));
+        }
     }
 
     return x;
@@ -60,8 +129,9 @@ int main(int argc, char** argv)
 
     mpca_lang(MPCA_LANG_DEFAULT,
     "                                                       \
-        number   : /-?[0-9]+(\\.[0-9]+)?/ ;                 \
-        operator : '+' | '-' | '*' | '/' | '%' ;            \
+        number   : /-?[0-9]+/ ;                             \
+        operator : '+' | '-' | '*' | '/' | '%' | '^' |      \
+                   \"min\" | \"max\";                       \
         expr     : <number> | '(' <operator> <expr>+ ')' ;  \
         program  : /^/ <operator> <expr>+ /$/ ;             \
     ",
@@ -83,7 +153,7 @@ int main(int argc, char** argv)
 
             mpc_ast_print(r.output);
 
-            printf("Result: %li\n", eval(a));
+            printf("%s\n", lval_format(eval(a)));
 
             mpc_ast_delete(r.output);
         } else {
