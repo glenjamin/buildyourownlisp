@@ -56,13 +56,6 @@ struct lval* lval_sexp(void) {
     return v;
 }
 
-struct lval* lval_add(struct lval* v, struct lval* x) {
-    v->count += 1;
-    v->cell = realloc(v->cell, v->count * sizeof(struct lval*));
-    v->cell[v->count - 1] = x;
-    return v;
-}
-
 void lval_del(struct lval* v) {
     switch(v->type) {
         case LVAL_NUM: break;
@@ -78,6 +71,39 @@ void lval_del(struct lval* v) {
             break;
     }
     free(v);
+}
+
+struct lval* lval_del_err(struct lval* x, char* msg) {
+    lval_del(x);
+    return lval_err(msg);
+}
+
+struct lval* lval_add(struct lval* v, struct lval* x) {
+    v->count += 1;
+    v->cell = realloc(v->cell, v->count * sizeof(struct lval*));
+    v->cell[v->count - 1] = x;
+    return v;
+}
+
+struct lval* lval_pop(struct lval* v, int i) {
+
+    struct lval* x = v->cell[i];
+
+    int width = sizeof(struct lval*);
+
+    memmove(&v->cell[i], &v->cell[i + 1], width * (v->count - i - 1));
+
+    v->count -= 1;
+
+    v->cell = realloc(v->cell, width * v->count);
+
+    return x;
+}
+
+struct lval* lval_take(struct lval* v, int i) {
+    struct lval* x = lval_pop(v, i);
+    lval_del(v);
+    return x;
 }
 
 void lval_print(struct lval* v) {
@@ -109,8 +135,8 @@ struct lval* lval_read_num(mpc_ast_t* node) {
 int read_ignore(mpc_ast_t* node) {
     if (strcmp(node->contents, "(") == 0) return 1;
     if (strcmp(node->contents, ")") == 0) return 1;
-    if (strcmp(node->contents, "{") == 0) return 1;
-    if (strcmp(node->contents, "}") == 0) return 1;
+    // if (strcmp(node->contents, "{") == 0) return 1;
+    // if (strcmp(node->contents, "}") == 0) return 1;
     if (strcmp(node->tag, "regex") == 0) return 1;
     return 0;
 }
@@ -133,79 +159,93 @@ struct lval* lval_read(mpc_ast_t* node) {
     return x;
 }
 
-// struct lval eval_operator(
-//     char* op, struct lval x, struct lval y
-// ) {
+struct lval* lval_eval_unary(char* sym, struct lval* v) {
+    if (v->type == LVAL_ERR) return v;
 
-//     if (x.type == LVAL_ERR) return x;
-//     if (y.type == LVAL_ERR) return y;
+    if (strcmp(sym, "-") == 0) v->num = -v->num;
 
-//     long a = x.num;
-//     long b = y.num;
+    return v;
+}
 
-//     if (strcmp(op, "+") == 0) {
-//         return lval_num(a + b);
-//     }
-//     if (strcmp(op, "-") == 0) {
-//         return lval_num(a - b);
-//     }
-//     if (strcmp(op, "*") == 0) {
-//         return lval_num(a * b);
-//     }
-//     if (strcmp(op, "/") == 0) {
-//         if (b == 0) return lval_err("Division by 0");
-//         return lval_num(a / b);
-//     }
-//     if (strcmp(op, "%") == 0) {
-//         if (b == 0) return lval_err("Division by 0");
-//         return lval_num(a % b);
-//     }
-//     if (strcmp(op, "^") == 0) {
-//         return lval_num(pow(a, b));
-//     }
-//     if (strcmp(op, "min") == 0) {
-//         return lval_num(a < b ? a : b);
-//     }
-//     if (strcmp(op, "maa") == 0) {
-//         return lval_num(a > b ? a : b);
-//     }
+struct lval* lval_eval_binary(
+    char* sym, struct lval* x, struct lval* y
+) {
+    long a = x->num;
+    long b = y->num;
 
-//     return lval_err("Unknown symbol");
-// }
+    if (strcmp(sym, "+") == 0) x->num = a + b;
+    else if (strcmp(sym, "-") == 0) x->num = a - b;
+    else if (strcmp(sym, "*") == 0) x->num = a * b;
+    else if (strcmp(sym, "^") == 0) x->num = pow(a, b);
+    else if (strcmp(sym, "min") == 0) x->num = a < b ? a : b;
+    else if (strcmp(sym, "max") == 0) x->num = a > b ? a : b;
+    else if (strcmp(sym, "/") == 0) {
+        if (b == 0) return lval_del_err(x, "Division by 0");
+        x->num = a / b;
+    }
+    else if (strcmp(sym, "%") == 0) {
+        if (b == 0) return lval_del_err(x, "Division by 0");
+        x->num = a % b;
+    }
+    else {
+        return lval_del_err(x, "Unknown symbol");
+    }
 
-// struct lval eval_unary(char* op, struct lval x) {
-//     if (x.type == LVAL_ERR) return x;
+    return x;
+}
 
-//     if (strcmp(op, "-") == 0) return lval_num(-1 * x.num);
-//     return x;
-// }
+struct lval* lval_eval_special(char* sym, struct lval* v) {
+    for (int i = 0; i < v->count; i++) {
+        if (v->cell[i]->type != LVAL_NUM) {
+            return lval_del_err(v, "I'll only work with numbers");
+        }
+    }
 
-// struct lval eval(mpc_ast_t* node) {
+    struct lval* x = lval_pop(v, 0);
 
-//     if (strstr(node->tag, "number")) {
-//         errno = 0;
-//         long x = strtol(node->contents, NULL, 10);
-//         if (errno == 0) {
-//             return lval_num(x);
-//         } else {
-//             lval_err("What number is this?");
-//         }
-//     }
+    if (v->count == 0) {
+        return lval_eval_unary(sym, x);
+    }
 
-//     char* op = node->children[1]->contents;
+    while (v->count > 0) {
+        struct lval* y = lval_pop(v, 0);
+        x = lval_eval_binary(sym, x, y);
+        lval_del(y);
+    }
 
-//     struct lval x = eval(node->children[2]);
+    lval_del(v);
 
-//     if (node->children_num == 4) {
-//         x = eval_unary(op, x);
-//     } else {
-//         for (int i = 3; i < node->children_num - 1; i++) {
-//             x = eval_operator(op, x, eval(node->children[i]));
-//         }
-//     }
+    return x;
+}
 
-//     return x;
-// }
+struct lval* lval_eval(struct lval* v) {
+    if (v->type != LVAL_SEXP) {
+        return v;
+    }
+
+    for (int i = 0; i < v->count; i++) {
+        v->cell[i] = lval_eval(v->cell[i]);
+    }
+
+    for (int i = 0; i < v->count; i++) {
+        if (v->cell[i]->type == LVAL_ERR) {
+            return lval_take(v, i);
+        }
+    }
+
+    if (v->count == 0) return v;
+
+    if (v->count == 1) return lval_take(v, 0);
+
+    struct lval* f = lval_pop(v, 0);
+    if (f->type != LVAL_SYM) {
+        lval_del(f); lval_del(v);
+        return lval_err("sexp does not start with a symbol");
+    }
+    struct lval* result = lval_eval_special(f->sym, v);
+    lval_del(f);
+    return result;
+}
 
 int main(int argc, char** argv)
 {
@@ -244,10 +284,15 @@ int main(int argc, char** argv)
             struct lval* x = lval_read(r.output);
             mpc_ast_delete(r.output);
 
-            lval_print(x);
-            putchar('\n');
-            lval_del(x);
+            puts("Input:");
+            lval_print(x); putchar('\n');
 
+            struct lval* r = lval_eval(x);
+
+            puts("Output:");
+            lval_print(r); putchar('\n');
+
+            lval_del(r);
 
         } else {
             mpc_err_print(r.error);
