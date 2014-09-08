@@ -274,6 +274,10 @@ int main(int argc, char** argv)
 
         char* input = readline("glenisp> ");
 
+        if (input == NULL) {
+            break;
+        }
+
         add_history(input);
 
         mpc_result_t r;
