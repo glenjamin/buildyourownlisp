@@ -9,7 +9,7 @@
 
 #include "mpc.h"
 
-enum lval_type { LVAL_ERR, LVAL_NUM, LVAL_SYM, LVAL_SEXP };
+enum lval_type { LVAL_ERR, LVAL_NUM, LVAL_SYM, LVAL_SEXP, LVAL_QEXP };
 
 struct lval {
     enum lval_type type;
@@ -55,6 +55,13 @@ struct lval* lval_sexp(void) {
     v->cell = NULL;
     return v;
 }
+struct lval* lval_qexp(void) {
+    struct lval* v = malloc(sizeof(struct lval));
+    v->type = LVAL_QEXP;
+    v->count = 0;
+    v->cell = NULL;
+    return v;
+}
 
 void lval_del(struct lval* v) {
     switch(v->type) {
@@ -64,6 +71,7 @@ void lval_del(struct lval* v) {
         case LVAL_SYM: free(v->sym); break;
 
         case LVAL_SEXP:
+        case LVAL_QEXP:
             for (int i = 0; i < v->count; i++) {
                 lval_del(v->cell[i]);
             }
@@ -73,10 +81,12 @@ void lval_del(struct lval* v) {
     free(v);
 }
 
-struct lval* lval_del_err(struct lval* x, char* msg) {
-    lval_del(x);
-    return lval_err(msg);
-}
+#define LASSERT(v, cond, err)   \
+    if (!(cond)) {              \
+        lval_del(v);            \
+        return lval_err(err);   \
+    }                           \
+
 
 struct lval* lval_add(struct lval* v, struct lval* x) {
     v->count += 1;
@@ -106,18 +116,28 @@ struct lval* lval_take(struct lval* v, int i) {
     return x;
 }
 
+struct lval* lval_join(struct lval* v, struct lval* x) {
+    while (x->count) {
+        v = lval_add(v, lval_pop(x, 0));
+    }
+    lval_del(x);
+    return v;
+}
+
 void lval_print(struct lval* v) {
     switch (v->type) {
         case LVAL_ERR: printf("Error: %s", v->err); break;
         case LVAL_NUM: printf("%li", v->num); break;
         case LVAL_SYM: printf("%s", v->sym); break;
+
         case LVAL_SEXP:
-            putchar('(');
+        case LVAL_QEXP:
+            putchar(v->type == LVAL_SEXP ? '(' : '{');
             for (int i = 0; i < v->count; i++) {
                 lval_print(v->cell[i]);
                 if (i != (v->count - 1)) putchar(' ');
             }
-            putchar(')');
+            putchar(v->type == LVAL_SEXP ? ')' : '}');
             break;
     }
 }
@@ -135,8 +155,8 @@ struct lval* lval_read_num(mpc_ast_t* node) {
 int read_ignore(mpc_ast_t* node) {
     if (strcmp(node->contents, "(") == 0) return 1;
     if (strcmp(node->contents, ")") == 0) return 1;
-    // if (strcmp(node->contents, "{") == 0) return 1;
-    // if (strcmp(node->contents, "}") == 0) return 1;
+    if (strcmp(node->contents, "{") == 0) return 1;
+    if (strcmp(node->contents, "}") == 0) return 1;
     if (strcmp(node->tag, "regex") == 0) return 1;
     return 0;
 }
@@ -148,16 +168,26 @@ struct lval* lval_read(mpc_ast_t* node) {
     if (strstr(node->tag, "symbol")) {
         return lval_sym(node->contents);
     }
-    if (strcmp(node->tag, ">") != 0 && !strstr(node->tag, "sexp")) {
+
+    struct lval* x;
+    if (strcmp(node->tag, ">") == 0 || strstr(node->tag, "sexp")) {
+        x = lval_sexp();
+    }
+    else if (strstr(node->tag, "qexp")) {
+        x = lval_qexp();
+    }
+    else {
         return lval_err("No idea what this is");
     }
-    struct lval* x = lval_sexp();
+
     for (int i = 0; i < node->children_num; i++) {
         if (read_ignore(node->children[i])) continue;
         x = lval_add(x, lval_read(node->children[i]));
     }
     return x;
 }
+
+struct lval* lval_eval(struct lval* v);
 
 struct lval* lval_eval_unary(char* sym, struct lval* v) {
     if (v->type == LVAL_ERR) return v;
@@ -180,25 +210,76 @@ struct lval* lval_eval_binary(
     else if (strcmp(sym, "min") == 0) x->num = a < b ? a : b;
     else if (strcmp(sym, "max") == 0) x->num = a > b ? a : b;
     else if (strcmp(sym, "/") == 0) {
-        if (b == 0) return lval_del_err(x, "Division by 0");
+        LASSERT(x, b != 0, "Division by 0");
         x->num = a / b;
     }
     else if (strcmp(sym, "%") == 0) {
-        if (b == 0) return lval_del_err(x, "Division by 0");
+        LASSERT(x, b != 0, "Division by 0");
         x->num = a % b;
     }
     else {
-        return lval_del_err(x, "Unknown symbol");
+        LASSERT(x, 0, "Unknown operator");
     }
 
     return x;
 }
 
-struct lval* lval_eval_special(char* sym, struct lval* v) {
+struct lval* lval_eval_head(struct lval* v) {
+    LASSERT(v, v->count == 1, "'head' expects only 1 argument");
+    LASSERT(v, v->cell[0]->type == LVAL_QEXP, "'head' expects Q-exp");
+    LASSERT(v, v->cell[0]->count > 0, "'head' non-empty Q-exp");
+
+    struct lval* x = lval_qexp();
+    lval_add(x, lval_take(lval_take(v, 0), 0));
+    return x;
+}
+
+struct lval* lval_eval_tail(struct lval* v) {
+    LASSERT(v, v->count == 1, "'tail' expects only 1 argument");
+    LASSERT(v, v->cell[0]->type == LVAL_QEXP, "'tail' expects Q-exp");
+    LASSERT(v, v->cell[0]->count > 0, "'tail' non-empty Q-exp");
+
+    struct lval* x = lval_take(v, 0);
+    lval_del(lval_pop(x, 0));
+    return x;
+}
+
+struct lval* lval_eval_list(struct lval* v) {
+    v->type = LVAL_QEXP;
+    return v;
+}
+
+struct lval* lval_eval_eval(struct lval* v) {
+    LASSERT(v, v->count == 1, "'eval' expects only 1 argument");
+    LASSERT(v, v->cell[0]->type == LVAL_QEXP, "'eval' expects Q-exp");
+
+    struct lval* x = lval_take(v, 0);
+    x->type = LVAL_SEXP;
+    return lval_eval(x);
+}
+
+struct lval* lval_eval_join(struct lval* v) {
     for (int i = 0; i < v->count; i++) {
-        if (v->cell[i]->type != LVAL_NUM) {
-            return lval_del_err(v, "I'll only work with numbers");
-        }
+        LASSERT(
+            v, v->cell[i]->type == LVAL_QEXP,
+            "'join' expects 1 or more Q-exps");
+    }
+
+    struct lval* x = lval_pop(v, 0);
+
+    while (v->count) {
+        x = lval_join(x, lval_pop(v, 0));
+    }
+
+    lval_del(v);
+    return x;
+}
+
+struct lval* lval_eval_op(char* sym, struct lval* v) {
+    for (int i = 0; i < v->count; i++) {
+        LASSERT(
+            v, v->cell[i]->type == LVAL_NUM,
+            "I'll only work with numbers");
     }
 
     struct lval* x = lval_pop(v, 0);
@@ -216,6 +297,15 @@ struct lval* lval_eval_special(char* sym, struct lval* v) {
     lval_del(v);
 
     return x;
+}
+
+struct lval* lval_eval_special(char* sym, struct lval* v) {
+    if (strcmp(sym, "list") == 0) return lval_eval_list(v);
+    if (strcmp(sym, "head") == 0) return lval_eval_head(v);
+    if (strcmp(sym, "tail") == 0) return lval_eval_tail(v);
+    if (strcmp(sym, "join") == 0) return lval_eval_join(v);
+    if (strcmp(sym, "eval") == 0) return lval_eval_eval(v);
+    return lval_eval_op(sym, v);
 }
 
 struct lval* lval_eval(struct lval* v) {
@@ -252,6 +342,7 @@ int main(int argc, char** argv)
     mpc_parser_t* Number = mpc_new("number");
     mpc_parser_t* Symbol = mpc_new("symbol");
     mpc_parser_t* Sexp = mpc_new("sexp");
+    mpc_parser_t* Qexp = mpc_new("qexp");
     mpc_parser_t* Expr = mpc_new("expr");
     mpc_parser_t* Program = mpc_new("program");
 
@@ -259,12 +350,14 @@ int main(int argc, char** argv)
     "                                                       \
         number   : /-?[0-9]+/ ;                             \
         symbol   : '+' | '-' | '*' | '/' | '%' | '^' |      \
-                   \"min\" | \"max\";                       \
+                   \"min\" | \"max\" | \"list\" | \"head\" |\
+                   \"tail\" | \"join\" | \"eval\" ;         \
         sexp     : '(' <expr>* ')' ;                        \
-        expr     : <number> | <symbol> | <sexp> ;           \
+        qexp     : '{' <expr>* '}' ;                        \
+        expr     : <number> | <symbol> | <sexp> | <qexp> ;  \
         program  : /^/ <expr>* /$/ ;                        \
     ",
-        Number, Symbol, Sexp, Expr, Program);
+        Number, Symbol, Sexp, Qexp, Expr, Program);
 
     puts("Welcome to gLenISP Version 0.0.0.1");
     puts("You have 1000 parentheses remaining");
@@ -307,7 +400,7 @@ int main(int argc, char** argv)
 
     }
 
-    mpc_cleanup(5, Number, Symbol, Sexp, Expr, Program);
+    mpc_cleanup(5, Number, Symbol, Sexp, Qexp, Expr, Program);
 
     return 0;
 }
