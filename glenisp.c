@@ -316,6 +316,12 @@ int read_ignore(mpc_ast_t* node) {
 }
 
 struct lval* lval_read(mpc_ast_t* node) {
+
+    // Upwrap top-level form as a single expression
+    if (strcmp(node->tag, ">") == 0) {
+        return lval_read(node->children[1]);
+    }
+
     if (strstr(node->tag, "number")) {
         return lval_read_num(node);
     }
@@ -324,7 +330,7 @@ struct lval* lval_read(mpc_ast_t* node) {
     }
 
     struct lval* x;
-    if (strcmp(node->tag, ">") == 0 || strstr(node->tag, "sexp")) {
+    if (strstr(node->tag, "sexp")) {
         x = lval_sexp();
     }
     else if (strstr(node->tag, "qexp")) {
@@ -434,7 +440,7 @@ struct lval* lval_eval_len(struct lenv* e, struct lval* v) {
 
 struct lval* lval_eval_eval(struct lenv* e, struct lval* v) {
     LNUMARGS(v, 1, "eval");
-    LTYPE(v, LVAL_QEXP, 0, "len");
+    LTYPE(v, LVAL_QEXP, 0, "eval");
 
     struct lval* x = lval_take(v, 0);
     x->type = LVAL_SEXP;
@@ -443,7 +449,7 @@ struct lval* lval_eval_eval(struct lenv* e, struct lval* v) {
 
 struct lval* lval_eval_cons(struct lenv* e, struct lval* v) {
     LNUMARGS(v, 2, "cons");
-    LTYPE(v, LVAL_QEXP, 1, "len");
+    LTYPE(v, LVAL_QEXP, 1, "cons");
 
     // New q-exp with first arg
     struct lval* x = lval_qexp();
@@ -513,10 +519,37 @@ struct lval* lval_builtin_def(struct lenv* e, struct lval* v) {
         syms->count, v->count -1);
 
     for (int i = 0; i < syms->count; i++) {
-        lenv_put(e, syms->cell[i]->sym, v->cell[i + 1]);
+        char* sym = syms->cell[i]->sym;
+        struct lval* x = lenv_get(e, sym);
+        if (x->type == LVAL_FN) {
+            struct lval* err = lval_err(
+                "Cannot redefine builtin function '%s'", sym);
+            lval_del(v);
+            return err;
+        }
+
+        lenv_put(e, sym, v->cell[i + 1]);
     }
 
     return lval_take(v, 0);
+}
+
+struct lval* lval_builtin_env(struct lenv* e, struct lval* v) {
+    LNUMARGS(v, 0, "env");
+
+    for (int i = 0; i < e->count; i++) {
+        printf("%s - ", e->syms[i]);
+        lval_print(e->vals[i]);
+        printf("\n");
+    }
+
+    return lval_sexp();
+}
+
+struct lval* lval_builtin_exit(struct lenv* e, struct lval* v) {
+    LNUMARGS(v, 0, "exit");
+
+    exit(EXIT_SUCCESS);
 }
 
 struct lval* lval_builtin_add(struct lenv* e, struct lval* v) {
@@ -565,6 +598,9 @@ void lenv_add_builtins(struct lenv* e) {
     lenv_add_builtin(e, "eval", lval_eval_eval);
 
     lenv_add_builtin(e, "def", lval_builtin_def);
+    lenv_add_builtin(e, "env", lval_builtin_env);
+
+    lenv_add_builtin(e, "exit", lval_builtin_exit);
 }
 
 struct lval* lval_eval_sexp(struct lenv* e, struct lval* v) {
@@ -580,8 +616,6 @@ struct lval* lval_eval_sexp(struct lenv* e, struct lval* v) {
     }
 
     if (v->count == 0) return v;
-
-    if (v->count == 1) return lval_take(v, 0);
 
     struct lval* f = lval_pop(v, 0);
     if (f->type != LVAL_FN) {
@@ -618,11 +652,11 @@ int main(int argc, char** argv)
     mpca_lang(MPCA_LANG_DEFAULT,
     "                                                       \
         number   : /-?[0-9]+/ ;                             \
-        symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&\\^]+/ ;       \
+        symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&\\^]+/ ;    \
         sexp     : '(' <expr>* ')' ;                        \
         qexp     : '{' <expr>* '}' ;                        \
         expr     : <number> | <symbol> | <sexp> | <qexp> ;  \
-        program  : /^/ <expr>* /$/ ;                        \
+        program  : /^/ <expr> /$/ ;                         \
     ",
         Number, Symbol, Sexp, Qexp, Expr, Program);
 
