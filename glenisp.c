@@ -9,9 +9,6 @@
 
 #include "mpc.h"
 
-#define STR_HELPER(x) #x
-#define STR(x) STR_HELPER(x)
-
 #define STR_COPY(a, b)          \
     a = malloc(strlen(b) + 1);  \
     strcpy(a, b);               \
@@ -20,6 +17,18 @@ enum lval_type {
     LVAL_ERR, LVAL_NUM, LVAL_SYM,
     LVAL_FN, LVAL_SEXP, LVAL_QEXP
 };
+
+char* lval_type_name(enum lval_type t) {
+    switch (t) {
+        case LVAL_ERR:  return "Error";
+        case LVAL_NUM:  return "Number";
+        case LVAL_SYM:  return "Symbol";
+        case LVAL_FN:   return "Function";
+        case LVAL_SEXP: return "Sexp";
+        case LVAL_QEXP: return "Qexp";
+        default: return "Unknown";
+    }
+}
 
 struct lval;
 struct lenv;
@@ -32,14 +41,17 @@ struct lval {
         char* err;
         long num;
         char* sym;
-        lfunc fn;
+        struct {
+            char* name;
+            lfunc fn;
+        };
         struct {
             int count;
             struct lval** cell;
         };
     };
 };
-struct lval* lval_err(char* msg);
+struct lval* lval_err(char* msg, ...);
 
 void lval_del(struct lval*);
 struct lval* lval_copy(struct lval*);
@@ -74,7 +86,7 @@ struct lval* lenv_get(struct lenv* e, char* sym) {
             return lval_copy(e->vals[i]);
         }
     }
-    return lval_err("Unbound symbol");
+    return lval_err("Unbound symbol '%s'", sym);
 }
 
 void lenv_put(struct lenv* e, char* sym, struct lval* v) {
@@ -100,12 +112,15 @@ struct lval* lval_num(long x) {
     return v;
 }
 
-struct lval* lval_err(char* msg) {
-    // TODO: avsprintf
+struct lval* lval_err(char* msg, ...) {
     struct lval* v = malloc(sizeof(struct lval));
     v->type = LVAL_ERR;
-    v->err = malloc(strlen(msg) + 1);
-    strcpy(v->err, msg);
+
+    va_list va;
+    va_start(va, msg);
+    vasprintf(&v->err, msg, va);
+    va_end(va);
+
     return v;
 }
 
@@ -117,9 +132,10 @@ struct lval* lval_sym(char* s) {
     return v;
 }
 
-struct lval* lval_fn(lfunc fn) {
+struct lval* lval_fn(char* name, lfunc fn) {
     struct lval* v = malloc(sizeof(struct lval));
     v->type = LVAL_FN;
+    STR_COPY(v->name, name);
     v->fn = fn;
     return v;
 }
@@ -142,7 +158,7 @@ struct lval* lval_qexp(void) {
 void lval_del(struct lval* v) {
     switch(v->type) {
         case LVAL_NUM: break;
-        case LVAL_FN: break;
+        case LVAL_FN: free(v->name); break;
 
         case LVAL_ERR: free(v->err); break;
         case LVAL_SYM: free(v->sym); break;
@@ -158,24 +174,38 @@ void lval_del(struct lval* v) {
     free(v);
 }
 
-#define LASSERT(v, cond, err)   \
-    if (!(cond)) {              \
-        lval_del(v);            \
-        return lval_err(err);   \
-    }                           \
+#define LASSERT(v, cond, msg, ...)                          \
+    if (!(cond)) {                                          \
+        struct lval* err = lval_err(msg, ##__VA_ARGS__);    \
+        lval_del(v);                                        \
+        return err;                                         \
+    }                                                       \
 
 #define LNUMARGS(v, n, source)                      \
     LASSERT(                                        \
         v,                                          \
         v->type == LVAL_SEXP && v->count == n,      \
-        source " expects " STR(n) " argument(s)");  \
+        "Wrong arg count for '%s'. "                \
+        "Got %i, expected %i",                      \
+        source, v->count, n);                       \
 
-#define LNONEMPTY(v, source)                    \
-    LASSERT(                                    \
-        v,                                      \
-        v->type == LVAL_QEXP && v->count > 0,   \
-        source " expects non-empty list");      \
+#define LTYPE(v, t, i, source)              \
+    LASSERT(                                \
+        v,                                  \
+        v->cell[i]->type == t,              \
+        "Wrong type for arg %i in '%s'. "   \
+        "Got %s, expected %s",              \
+        i, source,                          \
+        lval_type_name(v->cell[i]->type),   \
+        lval_type_name(t));                 \
 
+#define LNONEMPTY(v, i, source)                         \
+    LASSERT(                                            \
+        v,                                              \
+        v->cell[i]->type == LVAL_QEXP &&                \
+        v->cell[i]->count > 0,                          \
+        "'%s' expects arg %i to be a non-empty qexp",   \
+        source, i);                                     \
 
 struct lval* lval_add(struct lval* v, struct lval* x) {
     v->count += 1;
@@ -217,11 +247,15 @@ struct lval* lval_copy(struct lval* v) {
     struct lval* x = malloc(sizeof(struct lval));
     x->type = v->type;
     switch(v->type) {
-        case LVAL_FN: x->fn = v->fn; break;
         case LVAL_NUM: x->num = v->num; break;
 
         case LVAL_ERR: STR_COPY(x->err, v->err); break;
         case LVAL_SYM: STR_COPY(x->sym, v->sym); break;
+
+        case LVAL_FN:
+            STR_COPY(x->name, v->name);
+            x->fn = v->fn;
+            break;
 
         case LVAL_SEXP:
         case LVAL_QEXP:
@@ -242,7 +276,7 @@ void lval_print(struct lval* v) {
         case LVAL_NUM: printf("%li", v->num); break;
         case LVAL_SYM: printf("%s", v->sym); break;
 
-        case LVAL_FN: printf("<fn>"); break;
+        case LVAL_FN: printf("<fn %s>", v->name); break;
 
         case LVAL_SEXP:
         case LVAL_QEXP:
@@ -257,7 +291,7 @@ void lval_print(struct lval* v) {
 }
 
 void lenv_add_builtin(struct lenv* e, char* name, lfunc fn) {
-    struct lval* v = lval_fn(fn);
+    struct lval* v = lval_fn(name, fn);
     lenv_put(e, name, v);
     lval_del(v);
 }
@@ -268,7 +302,7 @@ struct lval* lval_read_num(mpc_ast_t* node) {
     if (errno == 0) {
         return lval_num(x);
     } else {
-        return lval_err("What number is this?");
+        return lval_err("Unknown number %s", node->contents);
     }
 }
 
@@ -297,7 +331,7 @@ struct lval* lval_read(mpc_ast_t* node) {
         x = lval_qexp();
     }
     else {
-        return lval_err("No idea what this is");
+        return lval_err("Unexpected node: %s", node->tag);
     }
 
     for (int i = 0; i < node->children_num; i++) {
@@ -340,27 +374,46 @@ struct lval* lval_eval_binary(
         x->num = a % b;
     }
     else {
-        LASSERT(x, 0, "Unknown operator");
+        LASSERT(x, 0, "Unknown operator %s", sym);
     }
 
     return x;
 }
 
 struct lval* lval_eval_head(struct lenv* e, struct lval* v) {
-    LNUMARGS(v, 1, "'head'");
-    LNONEMPTY(v->cell[0], "'head'");
+    LNUMARGS(v, 1, "head");
+    LNONEMPTY(v, 0, "head");
 
     struct lval* x = lval_qexp();
     lval_add(x, lval_take(lval_take(v, 0), 0));
     return x;
 }
 
+struct lval* lval_eval_last(struct lenv* e, struct lval* v) {
+    LNUMARGS(v, 1, "last");
+    LNONEMPTY(v, 0, "last");
+
+    struct lval* x = lval_qexp();
+    struct lval* l = lval_take(v, 0);
+    lval_add(x, lval_take(l, l->count - 1));
+    return x;
+}
+
 struct lval* lval_eval_tail(struct lenv* e, struct lval* v) {
-    LNUMARGS(v, 1, "'tail'");
-    LNONEMPTY(v->cell[0], "'tail'");
+    LNUMARGS(v, 1, "tail");
+    LNONEMPTY(v, 0, "tail");
 
     struct lval* x = lval_take(v, 0);
     lval_del(lval_pop(x, 0));
+    return x;
+}
+
+struct lval* lval_eval_init(struct lenv* e, struct lval* v) {
+    LNUMARGS(v, 1, "init");
+    LNONEMPTY(v, 0, "init");
+
+    struct lval* x = lval_take(v, 0);
+    lval_del(lval_pop(x, x->count - 1));
     return x;
 }
 
@@ -370,9 +423,8 @@ struct lval* lval_eval_list(struct lenv* e, struct lval* v) {
 }
 
 struct lval* lval_eval_len(struct lenv* e, struct lval* v) {
-    LNUMARGS(v, 1, "'len'");
-    LASSERT(v, v->cell[0]->type == LVAL_QEXP,
-        "'len' expects a Q-exp");
+    LNUMARGS(v, 1, "len");
+    LTYPE(v, LVAL_QEXP, 0, "len");
 
     struct lval* x = lval_num(v->cell[0]->count);
     lval_del(v);
@@ -381,8 +433,8 @@ struct lval* lval_eval_len(struct lenv* e, struct lval* v) {
 }
 
 struct lval* lval_eval_eval(struct lenv* e, struct lval* v) {
-    LNUMARGS(v, 1, "'eval'");
-    LASSERT(v, v->cell[0]->type == LVAL_QEXP, "'eval' expects Q-exp");
+    LNUMARGS(v, 1, "eval");
+    LTYPE(v, LVAL_QEXP, 0, "len");
 
     struct lval* x = lval_take(v, 0);
     x->type = LVAL_SEXP;
@@ -390,9 +442,8 @@ struct lval* lval_eval_eval(struct lenv* e, struct lval* v) {
 }
 
 struct lval* lval_eval_cons(struct lenv* e, struct lval* v) {
-    LNUMARGS(v, 2, "'cons'");
-    LASSERT(v, v->cell[1]->type == LVAL_QEXP,
-        "'cons' expects a value and a Q-exp");
+    LNUMARGS(v, 2, "cons");
+    LTYPE(v, LVAL_QEXP, 1, "len");
 
     // New q-exp with first arg
     struct lval* x = lval_qexp();
@@ -411,9 +462,7 @@ struct lval* lval_eval_cons(struct lenv* e, struct lval* v) {
 
 struct lval* lval_eval_join(struct lenv* e, struct lval* v) {
     for (int i = 0; i < v->count; i++) {
-        LASSERT(
-            v, v->cell[i]->type == LVAL_QEXP,
-            "'join' expects 1 or more Q-exps");
+        LTYPE(v, LVAL_QEXP, i, "join");
     }
 
     struct lval* x = lval_pop(v, 0);
@@ -428,9 +477,7 @@ struct lval* lval_eval_join(struct lenv* e, struct lval* v) {
 
 struct lval* lval_eval_op(struct lenv* e, char* sym, struct lval* v) {
     for (int i = 0; i < v->count; i++) {
-        LASSERT(
-            v, v->cell[i]->type == LVAL_NUM,
-            "I'll only work with numbers");
+        LTYPE(v, LVAL_NUM, i, sym);
     }
 
     struct lval* x = lval_pop(v, 0);
@@ -448,6 +495,28 @@ struct lval* lval_eval_op(struct lenv* e, char* sym, struct lval* v) {
     lval_del(v);
 
     return x;
+}
+
+struct lval* lval_builtin_def(struct lenv* e, struct lval* v) {
+    LTYPE(v, LVAL_QEXP, 0, "def");
+
+    struct lval* syms = v->cell[0];
+
+    for (int i = 0; i < syms->count; i++) {
+        LASSERT(v, syms->cell[i]->type == LVAL_SYM,
+            "'def' expects variable %i to be symbol", i);
+    }
+
+    LASSERT(v, syms->count == (v->count - 1),
+        "'def' expects same variable & value count. "
+        "Got %i variables and %i values.",
+        syms->count, v->count -1);
+
+    for (int i = 0; i < syms->count; i++) {
+        lenv_put(e, syms->cell[i]->sym, v->cell[i + 1]);
+    }
+
+    return lval_take(v, 0);
 }
 
 struct lval* lval_builtin_add(struct lenv* e, struct lval* v) {
@@ -486,13 +555,16 @@ void lenv_add_builtins(struct lenv* e) {
     lenv_add_builtin(e, "max", lval_builtin_max);
 
     lenv_add_builtin(e, "list", lval_eval_list);
-    lenv_add_builtin(e, "list", lval_eval_list);
     lenv_add_builtin(e, "head", lval_eval_head);
     lenv_add_builtin(e, "tail", lval_eval_tail);
+    lenv_add_builtin(e, "last", lval_eval_last);
+    lenv_add_builtin(e, "init", lval_eval_init);
     lenv_add_builtin(e, "join", lval_eval_join);
     lenv_add_builtin(e, "cons", lval_eval_cons);
     lenv_add_builtin(e, "len",  lval_eval_len);
     lenv_add_builtin(e, "eval", lval_eval_eval);
+
+    lenv_add_builtin(e, "def", lval_builtin_def);
 }
 
 struct lval* lval_eval_sexp(struct lenv* e, struct lval* v) {
@@ -514,7 +586,8 @@ struct lval* lval_eval_sexp(struct lenv* e, struct lval* v) {
     struct lval* f = lval_pop(v, 0);
     if (f->type != LVAL_FN) {
         lval_del(f); lval_del(v);
-        return lval_err("sexp does not start with a function");
+        return lval_err("Expected sexp to begin with %s, got %s",
+            lval_type_name(LVAL_FN), lval_type_name(f->type));
     }
     struct lval* result = f->fn(e, v);
     lval_del(f);
