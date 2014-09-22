@@ -457,47 +457,6 @@ struct lval* lval_eval(struct lenv* e, struct lval* v);
 
 struct lval* lval_eval_sexp(struct lenv* e, struct lval* v);
 
-struct lval* lval_eval_unary(char* sym, struct lval* v) {
-    if (v->type == LVAL_ERR) return v;
-
-    if (strcmp(sym, "-") == 0) v->num = -v->num;
-
-    return v;
-}
-
-struct lval* lval_eval_comparison(
-    char* sym, struct lval* x, struct lval* y
-) {
-    LASSERT(x, 0, "Unknown operator %s", sym);
-}
-
-struct lval* lval_eval_binary(
-    char* sym, struct lval* x, struct lval* y
-) {
-    long a = x->num;
-    long b = y->num;
-
-    if (strcmp(sym, "+") == 0) x->num = a + b;
-    else if (strcmp(sym, "-") == 0) x->num = a - b;
-    else if (strcmp(sym, "*") == 0) x->num = a * b;
-    else if (strcmp(sym, "^") == 0) x->num = pow(a, b);
-    else if (strcmp(sym, "min") == 0) x->num = a < b ? a : b;
-    else if (strcmp(sym, "max") == 0) x->num = a > b ? a : b;
-    else if (strcmp(sym, "/") == 0) {
-        LASSERT(x, b != 0, "Division by 0");
-        x->num = a / b;
-    }
-    else if (strcmp(sym, "%") == 0) {
-        LASSERT(x, b != 0, "Division by 0");
-        x->num = a % b;
-    }
-    else {
-        LASSERT(x, 0, "Unknown operator %s", sym);
-    }
-
-    return x;
-}
-
 struct lval* lval_builtin_head(struct lenv* e, struct lval* v) {
     LNUMARGS(v, 1, "head");
     LNONEMPTY(v, 0, "head");
@@ -593,6 +552,120 @@ struct lval* lval_builtin_join(struct lenv* e, struct lval* v) {
     return x;
 }
 
+struct lval* lval_builtin_if(struct lenv* e, struct lval* v) {
+    LNUMARGS(v, 3, "if");
+    LTYPE(v, LVAL_BOOL, 0, "if");
+    LTYPE(v, LVAL_QEXP, 1, "if");
+    LTYPE(v, LVAL_QEXP, 2, "if");
+
+    int result = v->cell[0]->flag;
+
+    struct lval* x = lval_sexp();
+    lval_add(x, lval_take(v, result ? 1 : 2));
+
+    return lval_builtin_eval(e, x);
+}
+
+int lval_equal(struct lval* x, struct lval* y) {
+    if (x->type != y->type) return 0;
+    switch (x->type) {
+        case LVAL_ERR: return 0;
+        case LVAL_NUM: return x->num == y->num;
+        case LVAL_BOOL: return x->flag == y->flag;
+        case LVAL_SYM: return strcmp(x->sym, y->sym) == 0;
+        case LVAL_FUN:
+            if (x->fun_type != y->fun_type) return 0;
+            switch (x->fun_type) {
+                case LVAL_FUN_BUILTIN:
+                    return x->builtin == y->builtin;
+                case LVAL_FUN_LAMBDA:
+                    return lval_equal(x->args, y->args) &&
+                        lval_equal(x->body, y->body);
+            }
+        case LVAL_SEXP:
+        case LVAL_QEXP:
+            if (x->count != y->count) return 0;
+            for (int i = 0; i < x->count; i++) {
+                if (!lval_equal(x->cell[i], y->cell[i])) {
+                    return 0;
+                }
+            }
+            return 1;
+    }
+}
+
+int lval_eval_compare(char* sym, struct lval* x, struct lval* y) {
+
+    if (strcmp(sym, "<") == 0) return x->num < y->num;
+    else if (strcmp(sym, ">") == 0) return x->num > y->num;
+    else if (strcmp(sym, ">=") == 0) return x->num >= y->num;
+    else if (strcmp(sym, "<=") == 0) return x->num <= y->num;
+    else if (strcmp(sym, "=") == 0) return lval_equal(x, y);
+    else if (strcmp(sym, "!=") == 0) return !lval_equal(x, y);
+
+    return 0;
+}
+
+struct lval* lval_eval_comp(struct lenv* e, char* sym, struct lval* v) {
+    if (strcmp(sym, "=") != 0 || strcmp(sym, "!=") != 0) {
+        for (int i = 0; i < v->count; i++) {
+            LTYPE(v, LVAL_NUM, i, sym);
+        }
+    }
+
+    if (v->count <= 1) {
+        lval_del(v);
+        return lval_bool(1);
+    }
+
+    struct lval* x = lval_pop(v, 0);
+
+    int result = 1;
+    while (v->count > 0) {
+        struct lval* y = lval_pop(v, 0);
+        if (lval_eval_compare(sym, x, y)) {
+            lval_del(x);
+            x = y;
+        } else {
+            lval_del(y);
+            result = 0;
+            break;
+        }
+    }
+
+    lval_del(x);
+    lval_del(v);
+
+    return lval_bool(result);
+}
+
+struct lval* lval_eval_binary(
+    char* sym, struct lval* x, struct lval* y
+) {
+    long a = x->num;
+    long b = y->num;
+
+    if (strcmp(sym, "+") == 0) x->num = a + b;
+    else if (strcmp(sym, "-") == 0) x->num = a - b;
+    else if (strcmp(sym, "*") == 0) x->num = a * b;
+    else if (strcmp(sym, "^") == 0) x->num = pow(a, b);
+    else if (strcmp(sym, "min") == 0) x->num = a < b ? a : b;
+    else if (strcmp(sym, "max") == 0) x->num = a > b ? a : b;
+    else if (strcmp(sym, "/") == 0) {
+        LASSERT(x, b != 0, "Division by 0");
+        x->num = a / b;
+    }
+    else if (strcmp(sym, "%") == 0) {
+        LASSERT(x, b != 0, "Division by 0");
+        x->num = a % b;
+    }
+    else {
+        LASSERT(x, 0, "Unknown operator %s", sym);
+    }
+
+    return x;
+}
+
 struct lval* lval_eval_op(struct lenv* e, char* sym, struct lval* v) {
     for (int i = 0; i < v->count; i++) {
         LTYPE(v, LVAL_NUM, i, sym);
@@ -603,7 +676,7 @@ struct lval* lval_eval_op(struct lenv* e, char* sym, struct lval* v) {
     struct lval* x = lval_pop(v, 0);
 
     if (v->count == 0) {
-        return lval_eval_unary(sym, x);
+        if (strcmp(sym, "-") == 0) x->num = -x->num;
     }
 
     while (v->count > 0) {
@@ -718,6 +791,33 @@ struct lval* lval_builtin_max(struct lenv* e, struct lval* v) {
     return lval_eval_op(e, "max", v);
 }
 
+struct lval* lval_builtin_not(struct lenv* e, struct lval* v) {
+    LNUMARGS(v, 1, "not");
+    LTYPE(v, LVAL_BOOL, 0, "not");
+
+    struct lval* x = lval_take(v, 0);
+    x->flag = !x->flag;
+    return x;
+}
+struct lval* lval_builtin_lt(struct lenv* e, struct lval* v) {
+    return lval_eval_comp(e, "<", v);
+}
+struct lval* lval_builtin_lte(struct lenv* e, struct lval* v) {
+    return lval_eval_comp(e, "<=", v);
+}
+struct lval* lval_builtin_gt(struct lenv* e, struct lval* v) {
+    return lval_eval_comp(e, ">", v);
+}
+struct lval* lval_builtin_gte(struct lenv* e, struct lval* v) {
+    return lval_eval_comp(e, ">=", v);
+}
+struct lval* lval_builtin_eq(struct lenv* e, struct lval* v) {
+    return lval_eval_comp(e, "=", v);
+}
+struct lval* lval_builtin_neq(struct lenv* e, struct lval* v) {
+    return lval_eval_comp(e, "!=", v);
+}
+
 void lenv_add_builtins(struct lenv* e) {
     lenv_add_builtin(e, "+", lval_builtin_add);
     lenv_add_builtin(e, "-", lval_builtin_sub);
@@ -728,6 +828,14 @@ void lenv_add_builtins(struct lenv* e) {
     lenv_add_builtin(e, "min", lval_builtin_min);
     lenv_add_builtin(e, "max", lval_builtin_max);
 
+    lenv_add_builtin(e, "!", lval_builtin_not);
+    lenv_add_builtin(e, "<", lval_builtin_lt);
+    lenv_add_builtin(e, "<=", lval_builtin_lte);
+    lenv_add_builtin(e, ">", lval_builtin_gt);
+    lenv_add_builtin(e, ">=", lval_builtin_gte);
+    lenv_add_builtin(e, "=", lval_builtin_eq);
+    lenv_add_builtin(e, "!=", lval_builtin_neq);
+
     lenv_add_builtin(e, "list", lval_builtin_list);
     lenv_add_builtin(e, "head", lval_builtin_head);
     lenv_add_builtin(e, "tail", lval_builtin_tail);
@@ -737,6 +845,8 @@ void lenv_add_builtins(struct lenv* e) {
     lenv_add_builtin(e, "cons", lval_builtin_cons);
     lenv_add_builtin(e, "len",  lval_builtin_len);
     lenv_add_builtin(e, "eval", lval_builtin_eval);
+
+    lenv_add_builtin(e, "if", lval_builtin_if);
 
     lenv_add_builtin(e, "def", lval_builtin_def);
     lenv_add_builtin(e, "env", lval_builtin_env);
