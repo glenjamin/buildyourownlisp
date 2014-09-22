@@ -15,7 +15,7 @@
 
 enum lval_type {
     LVAL_ERR, LVAL_NUM, LVAL_SYM,
-    LVAL_FUN, LVAL_SEXP, LVAL_QEXP
+    LVAL_FUN, LVAL_BOOL, LVAL_SEXP, LVAL_QEXP
 };
 
 char* lval_type_name(enum lval_type t) {
@@ -24,9 +24,9 @@ char* lval_type_name(enum lval_type t) {
         case LVAL_NUM:  return "Number";
         case LVAL_SYM:  return "Symbol";
         case LVAL_FUN:  return "Function";
+        case LVAL_BOOL: return "Boolean";
         case LVAL_SEXP: return "Sexp";
         case LVAL_QEXP: return "Qexp";
-        default: return "Unknown";
     }
 }
 
@@ -57,6 +57,7 @@ struct lval {
                 };
             };
         };
+        int flag;
         struct { // sexp / qexp
             int count;
             struct lval** cell;
@@ -186,6 +187,13 @@ struct lval* lval_lambda(struct lval* args, struct lval* body) {
     return v;
 }
 
+struct lval* lval_bool(int flag) {
+    struct lval* v = malloc(sizeof(struct lval));
+    v->type = LVAL_BOOL;
+    v->flag = flag == 0 ? 0 : 1;
+    return v;
+}
+
 struct lval* lval_sexp(void) {
     struct lval* v = malloc(sizeof(struct lval));
     v->type = LVAL_SEXP;
@@ -203,7 +211,9 @@ struct lval* lval_qexp(void) {
 
 void lval_del(struct lval* v) {
     switch(v->type) {
-        case LVAL_NUM: break;
+        case LVAL_BOOL:
+        case LVAL_NUM:
+            break;
         case LVAL_FUN:
             switch (v->fun_type) {
                 case LVAL_FUN_BUILTIN:
@@ -304,6 +314,7 @@ struct lval* lval_copy(struct lval* v) {
     struct lval* x = malloc(sizeof(struct lval));
     x->type = v->type;
     switch(v->type) {
+        case LVAL_BOOL: x->flag = v->flag; break;
         case LVAL_NUM: x->num = v->num; break;
 
         case LVAL_ERR: STR_COPY(x->err, v->err); break;
@@ -342,6 +353,7 @@ void lval_print(struct lval* v) {
         case LVAL_ERR: printf("Error: %s", v->err); break;
         case LVAL_NUM: printf("%li", v->num); break;
         case LVAL_SYM: printf("%s", v->sym); break;
+        case LVAL_BOOL: printf(v->flag ? "#t" : "#f"); break;
 
         case LVAL_FUN:
             switch (v->fun_type) {
@@ -377,14 +389,24 @@ void lenv_add_builtin(struct lenv* e, char* name, lfunc fn) {
     lval_del(v);
 }
 
-struct lval* lval_read_num(mpc_ast_t* node) {
+struct lval* lval_read_num(char* value) {
     errno = 0;
-    long x = strtol(node->contents, NULL, 10);
+    long x = strtol(value, NULL, 10);
     if (errno == 0) {
         return lval_num(x);
     } else {
-        return lval_err("Unknown number %s", node->contents);
+        return lval_err("Unknown number %s", value);
     }
+}
+
+struct lval* lval_read_bool(char* value) {
+    if (strcmp(value, "#t") == 0) {
+        return lval_bool(1);
+    }
+    if (strcmp(value, "#f") == 0) {
+        return lval_bool(0);
+    }
+    return lval_err("Unknown boolean %s", value);
 }
 
 int read_ignore(mpc_ast_t* node) {
@@ -404,10 +426,13 @@ struct lval* lval_read(mpc_ast_t* node) {
     }
 
     if (strstr(node->tag, "number")) {
-        return lval_read_num(node);
+        return lval_read_num(node->contents);
     }
     if (strstr(node->tag, "symbol")) {
         return lval_sym(node->contents);
+    }
+    if (strstr(node->tag, "bool")) {
+        return lval_read_bool(node->contents);
     }
 
     struct lval* x;
@@ -438,6 +463,12 @@ struct lval* lval_eval_unary(char* sym, struct lval* v) {
     if (strcmp(sym, "-") == 0) v->num = -v->num;
 
     return v;
+}
+
+struct lval* lval_eval_comparison(
+    char* sym, struct lval* x, struct lval* y
+) {
+    LASSERT(x, 0, "Unknown operator %s", sym);
 }
 
 struct lval* lval_eval_binary(
@@ -566,6 +597,8 @@ struct lval* lval_eval_op(struct lenv* e, char* sym, struct lval* v) {
     for (int i = 0; i < v->count; i++) {
         LTYPE(v, LVAL_NUM, i, sym);
     }
+
+    LASSERT(v, v->count > 0, "No arguments passed to '%s'", sym);
 
     struct lval* x = lval_pop(v, 0);
 
@@ -810,6 +843,7 @@ struct lval* lval_eval(struct lenv* e, struct lval* v) {
 
 int main(int argc, char** argv)
 {
+    mpc_parser_t* Bool = mpc_new("bool");
     mpc_parser_t* Number = mpc_new("number");
     mpc_parser_t* Symbol = mpc_new("symbol");
     mpc_parser_t* Sexp = mpc_new("sexp");
@@ -819,14 +853,16 @@ int main(int argc, char** argv)
 
     mpca_lang(MPCA_LANG_DEFAULT,
     "                                                       \
+        bool     : /#[tf]/ ;                                \
         number   : /-?[0-9]+/ ;                             \
         symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&\\^]+/ ;    \
         sexp     : '(' <expr>* ')' ;                        \
         qexp     : '{' <expr>* '}' ;                        \
-        expr     : <number> | <symbol> | <sexp> | <qexp> ;  \
+        expr     : <bool> | <number> | <symbol> |           \
+                   <sexp> | <qexp> ;                        \
         program  : /^/ <expr> /$/ ;                         \
     ",
-        Number, Symbol, Sexp, Qexp, Expr, Program);
+        Bool, Number, Symbol, Sexp, Qexp, Expr, Program);
 
     puts("Welcome to gLenISP Version 0.0.0.1");
     puts("You have 1000 parentheses remaining");
@@ -847,6 +883,8 @@ int main(int argc, char** argv)
 
         mpc_result_t r;
         if (mpc_parse("<stdin>", input, Program, &r)) {
+
+            //mpc_ast_print(r.output);
 
             struct lval* x = lval_read(r.output);
             mpc_ast_delete(r.output);
@@ -870,7 +908,7 @@ int main(int argc, char** argv)
 
     }
 
-    mpc_cleanup(5, Number, Symbol, Sexp, Qexp, Expr, Program);
+    mpc_cleanup(6, Bool, Number, Symbol, Sexp, Qexp, Expr, Program);
 
     return 0;
 }
