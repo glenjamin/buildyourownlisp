@@ -15,7 +15,7 @@
 
 enum lval_type {
     LVAL_ERR, LVAL_NUM, LVAL_SYM,
-    LVAL_FN, LVAL_SEXP, LVAL_QEXP
+    LVAL_FUN, LVAL_SEXP, LVAL_QEXP
 };
 
 char* lval_type_name(enum lval_type t) {
@@ -23,12 +23,14 @@ char* lval_type_name(enum lval_type t) {
         case LVAL_ERR:  return "Error";
         case LVAL_NUM:  return "Number";
         case LVAL_SYM:  return "Symbol";
-        case LVAL_FN:   return "Function";
+        case LVAL_FUN:  return "Function";
         case LVAL_SEXP: return "Sexp";
         case LVAL_QEXP: return "Qexp";
         default: return "Unknown";
     }
 }
+
+enum lval_fun_type { LVAL_FUN_BUILTIN, LVAL_FUN_LAMBDA };
 
 struct lval;
 struct lenv;
@@ -41,11 +43,21 @@ struct lval {
         char* err;
         long num;
         char* sym;
-        struct {
-            char* name;
-            lfunc fn;
+        struct { // functions
+            enum lval_fun_type fun_type;
+            union {
+                struct { //builtin
+                    char* name;
+                    lfunc builtin;
+                };
+                struct { // lambda
+                    struct lenv* env;
+                    struct lval* args;
+                    struct lval* body;
+                };
+            };
         };
-        struct {
+        struct { // sexp / qexp
             int count;
             struct lval** cell;
         };
@@ -57,6 +69,7 @@ void lval_del(struct lval*);
 struct lval* lval_copy(struct lval*);
 
 struct lenv {
+    struct lenv* parent;
     int count;
     char** syms;
     struct lval** vals;
@@ -64,6 +77,7 @@ struct lenv {
 
 struct lenv* lenv_new(void) {
     struct lenv* e = malloc(sizeof(struct lenv));
+    e->parent = NULL;
     e->count = 0;
     e->syms = NULL;
     e->vals = NULL;
@@ -86,6 +100,9 @@ struct lval* lenv_get(struct lenv* e, char* sym) {
             return lval_copy(e->vals[i]);
         }
     }
+    if (e->parent) {
+        return lenv_get(e->parent, sym);
+    }
     return lval_err("Unbound symbol '%s'", sym);
 }
 
@@ -103,6 +120,24 @@ void lenv_put(struct lenv* e, char* sym, struct lval* v) {
 
     STR_COPY(e->syms[e->count - 1], sym);
     e->vals[e->count - 1] = lval_copy(v);
+}
+
+void lenv_def(struct lenv* e, char* sym, struct lval* v) {
+    while (e->parent) e = e->parent;
+    lenv_put(e, sym, v);
+}
+
+struct lenv* lenv_copy(struct lenv* e) {
+    struct lenv* n = malloc(sizeof(struct lenv));
+    n->parent = e->parent;
+    n->count = e->count;
+    n->syms = malloc(sizeof(char*) * n->count);
+    n->vals = malloc(sizeof(struct lval*) * n->count);
+    for (int i = 0; i < e->count; i++) {
+        STR_COPY(n->syms[i], e->syms[i]);
+        n->vals[i] = lval_copy(e->vals[i]);
+    }
+    return n;
 }
 
 struct lval* lval_num(long x) {
@@ -132,11 +167,22 @@ struct lval* lval_sym(char* s) {
     return v;
 }
 
-struct lval* lval_fn(char* name, lfunc fn) {
+struct lval* lval_builtin(char* name, lfunc fn) {
     struct lval* v = malloc(sizeof(struct lval));
-    v->type = LVAL_FN;
+    v->type = LVAL_FUN;
+    v->fun_type = LVAL_FUN_BUILTIN;
     STR_COPY(v->name, name);
-    v->fn = fn;
+    v->builtin = fn;
+    return v;
+}
+
+struct lval* lval_lambda(struct lval* args, struct lval* body) {
+    struct lval* v = malloc(sizeof(struct lval));
+    v->type = LVAL_FUN;
+    v->fun_type = LVAL_FUN_LAMBDA;
+    v->env = lenv_new();
+    v->args = args;
+    v->body = body;
     return v;
 }
 
@@ -158,7 +204,18 @@ struct lval* lval_qexp(void) {
 void lval_del(struct lval* v) {
     switch(v->type) {
         case LVAL_NUM: break;
-        case LVAL_FN: free(v->name); break;
+        case LVAL_FUN:
+            switch (v->fun_type) {
+                case LVAL_FUN_BUILTIN:
+                    free(v->name);
+                    break;
+                case LVAL_FUN_LAMBDA:
+                    lenv_del(v->env);
+                    lval_del(v->args);
+                    lval_del(v->body);
+                    break;
+            }
+            break;
 
         case LVAL_ERR: free(v->err); break;
         case LVAL_SYM: free(v->sym); break;
@@ -252,9 +309,19 @@ struct lval* lval_copy(struct lval* v) {
         case LVAL_ERR: STR_COPY(x->err, v->err); break;
         case LVAL_SYM: STR_COPY(x->sym, v->sym); break;
 
-        case LVAL_FN:
-            STR_COPY(x->name, v->name);
-            x->fn = v->fn;
+        case LVAL_FUN:
+            x->fun_type = v->fun_type;
+            switch (v->fun_type) {
+                case LVAL_FUN_BUILTIN:
+                    STR_COPY(x->name, v->name);
+                    x->builtin = v->builtin;
+                    break;
+                case LVAL_FUN_LAMBDA:
+                    x->env = lenv_copy(v->env);
+                    x->args = lval_copy(v->args);
+                    x->body = lval_copy(v->body);
+                    break;
+            }
             break;
 
         case LVAL_SEXP:
@@ -276,7 +343,21 @@ void lval_print(struct lval* v) {
         case LVAL_NUM: printf("%li", v->num); break;
         case LVAL_SYM: printf("%s", v->sym); break;
 
-        case LVAL_FN: printf("<fn %s>", v->name); break;
+        case LVAL_FUN:
+            switch (v->fun_type) {
+                case LVAL_FUN_BUILTIN:
+                    printf("<fn %s>", v->name);
+                    break;
+                case LVAL_FUN_LAMBDA:
+                    printf("(\\ ");
+                    lval_print(v->args);
+                    putchar(' ');
+                    lval_print(v->body);
+                    putchar(')');
+                    break;
+            }
+            break;
+
 
         case LVAL_SEXP:
         case LVAL_QEXP:
@@ -291,7 +372,7 @@ void lval_print(struct lval* v) {
 }
 
 void lenv_add_builtin(struct lenv* e, char* name, lfunc fn) {
-    struct lval* v = lval_fn(name, fn);
+    struct lval* v = lval_builtin(name, fn);
     lenv_put(e, name, v);
     lval_del(v);
 }
@@ -386,7 +467,7 @@ struct lval* lval_eval_binary(
     return x;
 }
 
-struct lval* lval_eval_head(struct lenv* e, struct lval* v) {
+struct lval* lval_builtin_head(struct lenv* e, struct lval* v) {
     LNUMARGS(v, 1, "head");
     LNONEMPTY(v, 0, "head");
 
@@ -395,7 +476,7 @@ struct lval* lval_eval_head(struct lenv* e, struct lval* v) {
     return x;
 }
 
-struct lval* lval_eval_last(struct lenv* e, struct lval* v) {
+struct lval* lval_builtin_last(struct lenv* e, struct lval* v) {
     LNUMARGS(v, 1, "last");
     LNONEMPTY(v, 0, "last");
 
@@ -405,7 +486,7 @@ struct lval* lval_eval_last(struct lenv* e, struct lval* v) {
     return x;
 }
 
-struct lval* lval_eval_tail(struct lenv* e, struct lval* v) {
+struct lval* lval_builtin_tail(struct lenv* e, struct lval* v) {
     LNUMARGS(v, 1, "tail");
     LNONEMPTY(v, 0, "tail");
 
@@ -414,7 +495,7 @@ struct lval* lval_eval_tail(struct lenv* e, struct lval* v) {
     return x;
 }
 
-struct lval* lval_eval_init(struct lenv* e, struct lval* v) {
+struct lval* lval_builtin_init(struct lenv* e, struct lval* v) {
     LNUMARGS(v, 1, "init");
     LNONEMPTY(v, 0, "init");
 
@@ -423,12 +504,12 @@ struct lval* lval_eval_init(struct lenv* e, struct lval* v) {
     return x;
 }
 
-struct lval* lval_eval_list(struct lenv* e, struct lval* v) {
+struct lval* lval_builtin_list(struct lenv* e, struct lval* v) {
     v->type = LVAL_QEXP;
     return v;
 }
 
-struct lval* lval_eval_len(struct lenv* e, struct lval* v) {
+struct lval* lval_builtin_len(struct lenv* e, struct lval* v) {
     LNUMARGS(v, 1, "len");
     LTYPE(v, LVAL_QEXP, 0, "len");
 
@@ -438,7 +519,7 @@ struct lval* lval_eval_len(struct lenv* e, struct lval* v) {
     return x;
 }
 
-struct lval* lval_eval_eval(struct lenv* e, struct lval* v) {
+struct lval* lval_builtin_eval(struct lenv* e, struct lval* v) {
     LNUMARGS(v, 1, "eval");
     LTYPE(v, LVAL_QEXP, 0, "eval");
 
@@ -447,7 +528,7 @@ struct lval* lval_eval_eval(struct lenv* e, struct lval* v) {
     return lval_eval(e, x);
 }
 
-struct lval* lval_eval_cons(struct lenv* e, struct lval* v) {
+struct lval* lval_builtin_cons(struct lenv* e, struct lval* v) {
     LNUMARGS(v, 2, "cons");
     LTYPE(v, LVAL_QEXP, 1, "cons");
 
@@ -466,7 +547,7 @@ struct lval* lval_eval_cons(struct lenv* e, struct lval* v) {
     return lval_eval(e, x);
 }
 
-struct lval* lval_eval_join(struct lenv* e, struct lval* v) {
+struct lval* lval_builtin_join(struct lenv* e, struct lval* v) {
     for (int i = 0; i < v->count; i++) {
         LTYPE(v, LVAL_QEXP, i, "join");
     }
@@ -521,17 +602,39 @@ struct lval* lval_builtin_def(struct lenv* e, struct lval* v) {
     for (int i = 0; i < syms->count; i++) {
         char* sym = syms->cell[i]->sym;
         struct lval* x = lenv_get(e, sym);
-        if (x->type == LVAL_FN) {
+        if (x->type == LVAL_FUN && x->fun_type == LVAL_FUN_BUILTIN) {
             struct lval* err = lval_err(
                 "Cannot redefine builtin function '%s'", sym);
             lval_del(v);
             return err;
         }
 
-        lenv_put(e, sym, v->cell[i + 1]);
+        lenv_def(e, sym, v->cell[i + 1]);
     }
 
     return lval_take(v, 0);
+}
+
+struct lval* lval_builtin_lambda(struct lenv* e, struct lval* v) {
+    LNUMARGS(v, 2, "\\");
+    LTYPE(v, LVAL_QEXP, 0, "\\");
+    LTYPE(v, LVAL_QEXP, 1, "\\");
+
+    for (int i = 0; i < v->cell[0]->count; i++) {
+        struct lval* s = v->cell[0]->cell[i];
+        LASSERT(v, s->type == LVAL_SYM,
+            "'\\' expects variable %i to be symbol", i);
+
+        if (strcmp(s->sym, "&") == 0) {
+            LASSERT(v, v->cell[0]->count == i + 2,
+                "'\\' requires exactly one symbol after &");
+        }
+    }
+
+    struct lval* x = lval_lambda(lval_pop(v, 0), lval_pop(v, 0));
+    lval_del(v);
+
+    return x;
 }
 
 struct lval* lval_builtin_env(struct lenv* e, struct lval* v) {
@@ -541,6 +644,11 @@ struct lval* lval_builtin_env(struct lenv* e, struct lval* v) {
         printf("%s - ", e->syms[i]);
         lval_print(e->vals[i]);
         printf("\n");
+    }
+
+    if (e->parent) {
+        printf("parent:\n");
+        lval_builtin_env(e->parent, v);
     }
 
     return lval_sexp();
@@ -587,20 +695,77 @@ void lenv_add_builtins(struct lenv* e) {
     lenv_add_builtin(e, "min", lval_builtin_min);
     lenv_add_builtin(e, "max", lval_builtin_max);
 
-    lenv_add_builtin(e, "list", lval_eval_list);
-    lenv_add_builtin(e, "head", lval_eval_head);
-    lenv_add_builtin(e, "tail", lval_eval_tail);
-    lenv_add_builtin(e, "last", lval_eval_last);
-    lenv_add_builtin(e, "init", lval_eval_init);
-    lenv_add_builtin(e, "join", lval_eval_join);
-    lenv_add_builtin(e, "cons", lval_eval_cons);
-    lenv_add_builtin(e, "len",  lval_eval_len);
-    lenv_add_builtin(e, "eval", lval_eval_eval);
+    lenv_add_builtin(e, "list", lval_builtin_list);
+    lenv_add_builtin(e, "head", lval_builtin_head);
+    lenv_add_builtin(e, "tail", lval_builtin_tail);
+    lenv_add_builtin(e, "last", lval_builtin_last);
+    lenv_add_builtin(e, "init", lval_builtin_init);
+    lenv_add_builtin(e, "join", lval_builtin_join);
+    lenv_add_builtin(e, "cons", lval_builtin_cons);
+    lenv_add_builtin(e, "len",  lval_builtin_len);
+    lenv_add_builtin(e, "eval", lval_builtin_eval);
 
     lenv_add_builtin(e, "def", lval_builtin_def);
     lenv_add_builtin(e, "env", lval_builtin_env);
 
+    lenv_add_builtin(e, "\\", lval_builtin_lambda);
+
     lenv_add_builtin(e, "exit", lval_builtin_exit);
+}
+
+struct lval* lval_eval_call(struct lenv* e, struct lval* f, struct lval* args) {
+    if (f->fun_type == LVAL_FUN_BUILTIN) {
+        return f->builtin(e, args);
+    }
+
+    int given = args->count;
+    int total = f->args->count;
+
+    while (args->count) {
+        if (f->args->count == 0) {
+            lval_del(args);
+            return lval_err(
+                "Too many arguments. Got %i, expected %i.",
+                given, total
+            );
+        }
+
+        struct lval* sym = lval_pop(f->args, 0);
+
+        if (strcmp(sym->sym, "&") == 0) {
+            // varargs
+            lval_del(sym);
+            sym = lval_pop(f->args, 0);
+            lenv_put(f->env, sym->sym, lval_builtin_list(e, args));
+            lval_del(sym);
+            break;
+        }
+
+        struct lval* val = lval_pop(args, 0);
+        lenv_put(f->env, sym->sym, val);
+
+        lval_del(sym);
+        lval_del(val);
+    }
+
+    lval_del(args);
+
+    if (f->args->count > 0) {
+        if (strcmp(f->args->cell[0]->sym, "&") != 0) {
+            return lval_copy(f);
+        }
+        // Got all args except varargs, so produce empty list
+        struct lval* val = lval_qexp();
+        lenv_put(f->env, f->args->cell[1]->sym, val);
+        lval_del(val);
+    }
+
+    f->env->parent = e;
+
+    struct lval* sexp = lval_sexp();
+    lval_add(sexp, lval_copy(f->body));
+
+    return lval_builtin_eval(f->env, sexp);
 }
 
 struct lval* lval_eval_sexp(struct lenv* e, struct lval* v) {
@@ -618,12 +783,15 @@ struct lval* lval_eval_sexp(struct lenv* e, struct lval* v) {
     if (v->count == 0) return v;
 
     struct lval* f = lval_pop(v, 0);
-    if (f->type != LVAL_FN) {
-        lval_del(f); lval_del(v);
-        return lval_err("Expected sexp to begin with %s, got %s",
-            lval_type_name(LVAL_FN), lval_type_name(f->type));
+    if (f->type != LVAL_FUN) {
+        struct lval* err = lval_err(
+            "Expected sexp to begin with %s, got %s",
+            lval_type_name(LVAL_FUN), lval_type_name(f->type));
+        lval_del(f);
+        lval_del(v);
+        return err;
     }
-    struct lval* result = f->fn(e, v);
+    struct lval* result = lval_eval_call(e, f, v);
     lval_del(f);
     return result;
 }
@@ -679,8 +847,6 @@ int main(int argc, char** argv)
 
         mpc_result_t r;
         if (mpc_parse("<stdin>", input, Program, &r)) {
-
-            mpc_ast_print(r.output);
 
             struct lval* x = lval_read(r.output);
             mpc_ast_delete(r.output);
