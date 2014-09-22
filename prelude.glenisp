@@ -1,0 +1,13 @@
+(def {fun}
+  (\ {args body}
+    {def {(head args)}
+      (\ (tail args) {body})}))
+(def {fun} (\ {args body} {def (list (head args)) (\ (tail args) body)}))
+
+(fun {contains? l x}
+  {if (= l {})
+    {id #f}
+    (if (= (head l) x)
+      {id #t}
+      (contains? (tail l) x))})
+(fun {contains? l x} {if (= l {}) {id #f} (if (= (head l) x) {id #t} (contains? (tail l) x))})

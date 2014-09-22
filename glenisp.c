@@ -461,19 +461,15 @@ struct lval* lval_builtin_head(struct lenv* e, struct lval* v) {
     LNUMARGS(v, 1, "head");
     LNONEMPTY(v, 0, "head");
 
-    struct lval* x = lval_qexp();
-    lval_add(x, lval_take(lval_take(v, 0), 0));
-    return x;
+    return lval_take(lval_take(v, 0), 0);
 }
 
 struct lval* lval_builtin_last(struct lenv* e, struct lval* v) {
     LNUMARGS(v, 1, "last");
     LNONEMPTY(v, 0, "last");
 
-    struct lval* x = lval_qexp();
     struct lval* l = lval_take(v, 0);
-    lval_add(x, lval_take(l, l->count - 1));
-    return x;
+    return lval_take(l, l->count - 1);
 }
 
 struct lval* lval_builtin_tail(struct lenv* e, struct lval* v) {
@@ -550,6 +546,12 @@ struct lval* lval_builtin_join(struct lenv* e, struct lval* v) {
 
     lval_del(v);
     return x;
+}
+
+struct lval* lval_builtin_id(struct lenv* e, struct lval* v) {
+    LNUMARGS(v, 1, "id");
+
+    return lval_eval(e, lval_take(v, 0));
 }
 
 struct lval* lval_builtin_if(struct lenv* e, struct lval* v) {
@@ -819,6 +821,8 @@ struct lval* lval_builtin_neq(struct lenv* e, struct lval* v) {
 }
 
 void lenv_add_builtins(struct lenv* e) {
+    lenv_add_builtin(e, "id", lval_builtin_id);
+
     lenv_add_builtin(e, "+", lval_builtin_add);
     lenv_add_builtin(e, "-", lval_builtin_sub);
     lenv_add_builtin(e, "*", lval_builtin_mul);
@@ -965,7 +969,7 @@ int main(int argc, char** argv)
     "                                                       \
         bool     : /#[tf]/ ;                                \
         number   : /-?[0-9]+/ ;                             \
-        symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&\\^]+/ ;    \
+        symbol   : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&\\^?]+/ ;   \
         sexp     : '(' <expr>* ')' ;                        \
         qexp     : '{' <expr>* '}' ;                        \
         expr     : <bool> | <number> | <symbol> |           \
